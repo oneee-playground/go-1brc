@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,7 +12,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
-	"strconv"
+	"unsafe"
 )
 
 const (
@@ -124,18 +123,36 @@ func processFile(file *os.File, size int64) (map[string]stat, error) {
 }
 
 func parseLine(line []byte) (string, float64, error) {
-	station, data, found := bytes.Cut(line, []byte(";"))
-	if !found {
-		return "", 0, errors.New("sep not found when splitting line")
-	}
+	idx := bytes.IndexByte(line, ';')
+	station := line[:idx]
+	data := line[idx+1:]
 
-	key := string(station)
-	val, err := strconv.ParseFloat(string(data), 64)
-	if err != nil {
-		return "", 0, fmt.Errorf("parsing data as float: %w", err)
-	}
+	b := make([]byte, len(station))
+	copy(b, station)
+	key := unsafe.String(unsafe.SliceData(b), len(b))
 
+	val := parseFloat64(data)
 	return key, val, nil
+}
+
+func parseFloat64(b []byte) float64 {
+	signed := b[0] == '-'
+	if signed {
+		b = b[1:]
+	}
+
+	val := float64(b[len(b)-1]-'0') / 10
+	mul := 1.0
+	for i := len(b) - 3; i >= 0; i-- {
+		val += float64(b[i]-'0') * mul
+		mul *= 10
+	}
+
+	if signed {
+		val = -val
+	}
+
+	return val
 }
 
 func writeResult(w io.Writer, result map[string]stat) error {
