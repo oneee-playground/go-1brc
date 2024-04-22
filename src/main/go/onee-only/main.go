@@ -14,11 +14,12 @@ import (
 	"runtime/trace"
 	"sort"
 	"sync"
+	"syscall"
 	"unsafe"
 )
 
 const (
-	version = "v3"
+	version = "v4"
 
 	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
@@ -40,7 +41,7 @@ type stat struct {
 }
 
 type remainder struct {
-	loc int64
+	loc int
 	b   []byte
 }
 
@@ -86,12 +87,22 @@ func main() {
 		defer trace.Stop()
 	}
 
-	info, err := os.Stat(dataPath)
+	file, err := os.Open(dataPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	result, err := processFile(info.Size())
+	stat, err := file.Stat()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	data, err := syscall.Mmap(int(file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result, err := processFile(data)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -101,27 +112,28 @@ func main() {
 	}
 }
 
-func processFile(size int64) (map[string]stat, error) {
+func processFile(data []byte) (map[string]stat, error) {
 	var (
 		stats      = make([]map[string]stat, numWorkers)
 		remainders = make([]remainder, numWorkers)
-		ends       = make([]int64, numWorkers)
+		ends       = make([]int, numWorkers)
 	)
 
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
 
-	chunkPerWorker := size / int64(numWorkers)
-	offset := int64(0)
+	chunkPerWorker := len(data) / numWorkers
+	offset := 0
 
 	for i := 0; i < numWorkers; i++ {
 		s := chunkPerWorker
 		if i == numWorkers-1 {
-			s = size - offset
+			s = len(data) - offset
 		}
-		go func(i int, offset, size int64) {
+		go func(i, offset, size int) {
 			defer wg.Done()
-			stat, rem, end, err := processChunk(offset, size)
+			r := bytes.NewReader(data[offset:])
+			stat, rem, end, err := processChunk(r, offset, size)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -157,25 +169,15 @@ func processFile(size int64) (map[string]stat, error) {
 	return rootStat, nil
 }
 
-func processChunk(offset, chunkSize int64) (map[string]stat, remainder, int64, error) {
-	file, err := os.Open(dataPath)
-	if err != nil {
-		return nil, remainder{}, 0, fmt.Errorf("opening file: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.Seek(offset, 0); err != nil {
-		return nil, remainder{}, 0, fmt.Errorf("seeking offset from file: %w", err)
-	}
-
-	sc := bufio.NewScanner(file)
+func processChunk(r io.Reader, offset, chunkSize int) (map[string]stat, remainder, int, error) {
+	sc := bufio.NewScanner(r)
 	stats := make(map[string]stat)
 
 	var rem remainder
 	if sc.Scan() {
 		// Always send first line. Since it could be malformed data.
 		rem = remainder{loc: offset, b: bytes.Clone(sc.Bytes())}
-		offset += int64(len(sc.Bytes()))
+		offset += len(sc.Bytes())
 	}
 
 	limit := offset + chunkSize
@@ -186,7 +188,7 @@ func processChunk(offset, chunkSize int64) (map[string]stat, remainder, int64, e
 		}
 
 		updateStat(stats, station, val)
-		offset += int64(len(sc.Bytes()))
+		offset += len(sc.Bytes())
 	}
 
 	if sc.Err() != nil && sc.Err() != io.EOF {
