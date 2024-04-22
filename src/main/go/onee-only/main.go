@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	version = "v4"
+	version = "v5"
 
 	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
@@ -38,6 +39,11 @@ var (
 type stat struct {
 	sum, max, min float64
 	cnt           int
+}
+
+type entry struct {
+	key  string
+	stat stat
 }
 
 type remainder struct {
@@ -114,7 +120,7 @@ func main() {
 
 func processFile(data []byte) (map[string]stat, error) {
 	var (
-		stats      = make([]map[string]stat, numWorkers)
+		stats      = make([]map[uint64][]entry, numWorkers)
 		remainders = make([]remainder, numWorkers)
 		ends       = make([]int, numWorkers)
 	)
@@ -147,9 +153,24 @@ func processFile(data []byte) (map[string]stat, error) {
 
 	wg.Wait()
 
-	rootStat := stats[0]
-	for _, s := range stats[1:] {
-		mergeStat(rootStat, s)
+	rootStat := make(map[string]stat, len(stats)*len(stats[0]))
+	for _, s := range stats {
+		for _, arr := range s {
+			for _, entry := range arr {
+				s, ok := rootStat[entry.key]
+				if !ok {
+					rootStat[entry.key] = entry.stat
+					continue
+				}
+
+				s.cnt += entry.stat.cnt
+				s.sum += entry.stat.sum
+				s.min = min(s.min, entry.stat.min)
+				s.max = max(s.max, entry.stat.max)
+
+				rootStat[entry.key] = s
+			}
+		}
 	}
 
 	// First remainder should always be valid.
@@ -163,15 +184,25 @@ func processFile(data []byte) (map[string]stat, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing line: %w", err)
 		}
-		updateStat(rootStat, k, v)
+		s, ok := rootStat[k]
+		if !ok {
+			rootStat[k] = stat{sum: v, max: v, min: v, cnt: 1}
+			continue
+		}
+
+		s.cnt++
+		s.sum += v
+		s.max = max(s.max, v)
+		s.min = min(s.min, v)
+		rootStat[k] = s
 	}
 
 	return rootStat, nil
 }
 
-func processChunk(r io.Reader, offset, chunkSize int) (map[string]stat, remainder, int, error) {
+func processChunk(r io.Reader, offset, chunkSize int) (map[uint64][]entry, remainder, int, error) {
 	sc := bufio.NewScanner(r)
-	stats := make(map[string]stat)
+	stats := make(map[uint64][]entry)
 
 	var rem remainder
 	if sc.Scan() {
@@ -187,7 +218,29 @@ func processChunk(r io.Reader, offset, chunkSize int) (map[string]stat, remainde
 			return nil, remainder{}, 0, fmt.Errorf("parsing line: %w", err)
 		}
 
-		updateStat(stats, station, val)
+		hash := fnv.New64a()
+		hash.Write([]byte(station))
+		h := hash.Sum64()
+
+		found := false
+		for i, e := range stats[h] {
+			if e.key == station {
+				found = true
+				e.stat.cnt++
+				e.stat.sum += val
+				e.stat.max = max(e.stat.max, val)
+				e.stat.min = min(e.stat.min, val)
+				stats[h][i] = e
+				break
+			}
+		}
+		if !found {
+			stats[h] = append(stats[h], entry{
+				key:  station,
+				stat: stat{sum: val, max: val, min: val, cnt: 1},
+			})
+		}
+
 		offset += len(sc.Bytes())
 	}
 
@@ -255,37 +308,6 @@ func writeResult(w io.Writer, result map[string]stat) error {
 	return nil
 }
 
-func updateStat(stats map[string]stat, key string, val float64) {
-	s, ok := stats[key]
-	if !ok {
-		stats[key] = stat{sum: val, max: val, min: val, cnt: 1}
-		return
-	}
-
-	s.cnt++
-	s.max = max(s.max, val)
-	s.min = min(s.min, val)
-	s.sum += val
-
-	stats[key] = s
-}
-
-func mergeStat(dst map[string]stat, src map[string]stat) {
-	for k, v := range src {
-		stat, ok := dst[k]
-		if !ok {
-			dst[k] = v
-			continue
-		}
-
-		stat.cnt += v.cnt
-		stat.max = max(stat.max, v.max)
-		stat.min = min(stat.min, v.min)
-		stat.sum += v.sum
-
-		dst[k] = stat
-	}
-}
 func round(n float64) float64 {
 	return math.Round(n*10) / 10
 }
