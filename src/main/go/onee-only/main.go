@@ -21,7 +21,7 @@ import (
 const (
 	version = "v2"
 
-	dataPath = "../../../../measurements.txt"
+	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
 	pprofEnabled = true
 	traceEnabled = true
