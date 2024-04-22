@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ func TestParseLine(t *testing.T) {
 		t.Error(err)
 	}
 
-	if k != "hi" || v != -42.5 {
+	if bytes.Equal(k, []byte("hi")) || v != -42.5 {
 		t.Error(k, v)
 	}
 }

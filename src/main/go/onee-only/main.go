@@ -26,6 +26,8 @@ const (
 
 	pprofEnabled = true
 	traceEnabled = true
+
+	entrySize = 1 << 14
 )
 
 var (
@@ -42,7 +44,8 @@ type stat struct {
 }
 
 type entry struct {
-	key  string
+	key  []byte
+	hash uint64
 	stat stat
 }
 
@@ -120,7 +123,7 @@ func main() {
 
 func processFile(data []byte) (map[string]stat, error) {
 	var (
-		stats      = make([]map[uint64][]entry, numWorkers)
+		stats      = make([]*[entrySize]entry, numWorkers)
 		remainders = make([]remainder, numWorkers)
 		ends       = make([]int, numWorkers)
 	)
@@ -153,40 +156,42 @@ func processFile(data []byte) (map[string]stat, error) {
 
 	wg.Wait()
 
-	rootStat := make(map[string]stat, len(stats)*len(stats[0]))
+	rootStat := make(map[string]stat, entrySize)
 	for _, s := range stats {
-		for _, arr := range s {
-			for _, entry := range arr {
-				s, ok := rootStat[entry.key]
-				if !ok {
-					rootStat[entry.key] = entry.stat
-					continue
-				}
-
-				s.cnt += entry.stat.cnt
-				s.sum += entry.stat.sum
-				s.min = min(s.min, entry.stat.min)
-				s.max = max(s.max, entry.stat.max)
-
-				rootStat[entry.key] = s
+		for _, entry := range s {
+			if len(entry.key) == 0 {
+				continue
 			}
+			k := unsafe.String(unsafe.SliceData(entry.key), len(entry.key))
+
+			s, ok := rootStat[k]
+			if !ok {
+				rootStat[k] = entry.stat
+				continue
+			}
+
+			s.cnt += entry.stat.cnt
+			s.sum += entry.stat.sum
+			s.min = min(s.min, entry.stat.min)
+			s.max = max(s.max, entry.stat.max)
+
+			rootStat[k] = s
 		}
 	}
 
-	// First remainder should always be valid.
-	remainders = remainders[1:]
-
 	for i, rem := range remainders {
-		if rem.loc < ends[i] {
+		// First remainder should always be valid.
+		if i > 0 && rem.loc < ends[i-1] {
 			continue
 		}
 		k, v, err := parseLine(rem.b)
 		if err != nil {
 			return nil, fmt.Errorf("parsing line: %w", err)
 		}
-		s, ok := rootStat[k]
+		kstr := unsafe.String(unsafe.SliceData(k), len(k))
+		s, ok := rootStat[kstr]
 		if !ok {
-			rootStat[k] = stat{sum: v, max: v, min: v, cnt: 1}
+			rootStat[kstr] = stat{sum: v, max: v, min: v, cnt: 1}
 			continue
 		}
 
@@ -194,15 +199,28 @@ func processFile(data []byte) (map[string]stat, error) {
 		s.sum += v
 		s.max = max(s.max, v)
 		s.min = min(s.min, v)
-		rootStat[k] = s
+		rootStat[kstr] = s
 	}
 
 	return rootStat, nil
 }
 
-func processChunk(r io.Reader, offset, chunkSize int) (map[uint64][]entry, remainder, int, error) {
+func processChunk(r io.Reader, offset, chunkSize int) (*[entrySize]entry, remainder, int, error) {
 	sc := bufio.NewScanner(r)
-	stats := make(map[uint64][]entry)
+
+	entries := [entrySize]entry{}
+
+	getEntry := func(hash uint64, val []byte) *entry {
+		h := hash & (entrySize - 1)
+		e := &entries[h]
+
+		for len(e.key) > 0 && !(e.hash == hash && bytes.Equal(e.key, val)) {
+			h = (h + 1) & (entrySize - 1)
+			e = &entries[h]
+		}
+
+		return e
+	}
 
 	var rem remainder
 	if sc.Scan() {
@@ -219,26 +237,21 @@ func processChunk(r io.Reader, offset, chunkSize int) (map[uint64][]entry, remai
 		}
 
 		hash := fnv.New64a()
-		hash.Write([]byte(station))
+		hash.Write(station)
 		h := hash.Sum64()
 
-		found := false
-		for i, e := range stats[h] {
-			if e.key == station {
-				found = true
-				e.stat.cnt++
-				e.stat.sum += val
-				e.stat.max = max(e.stat.max, val)
-				e.stat.min = min(e.stat.min, val)
-				stats[h][i] = e
-				break
-			}
-		}
-		if !found {
-			stats[h] = append(stats[h], entry{
+		e := getEntry(h, station)
+		if len(e.key) == 0 {
+			*e = entry{
 				key:  station,
+				hash: h,
 				stat: stat{sum: val, max: val, min: val, cnt: 1},
-			})
+			}
+		} else {
+			e.stat.cnt++
+			e.stat.sum += val
+			e.stat.max = max(e.stat.max, val)
+			e.stat.min = min(e.stat.min, val)
 		}
 
 		offset += len(sc.Bytes())
@@ -248,17 +261,16 @@ func processChunk(r io.Reader, offset, chunkSize int) (map[uint64][]entry, remai
 		return nil, remainder{}, 0, fmt.Errorf("reading file: %w", sc.Err())
 	}
 
-	return stats, rem, offset, nil
+	return &entries, rem, offset, nil
 }
 
-func parseLine(line []byte) (string, float64, error) {
+func parseLine(line []byte) ([]byte, float64, error) {
 	idx := bytes.IndexByte(line, ';')
 	station := line[:idx]
 	data := line[idx+1:]
 
-	b := make([]byte, len(station))
-	copy(b, station)
-	key := unsafe.String(unsafe.SliceData(b), len(b))
+	key := make([]byte, len(station))
+	copy(key, station)
 
 	val := parseFloat64(data)
 	return key, val, nil
