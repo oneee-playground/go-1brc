@@ -9,14 +9,16 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
+	"sync"
 	"unsafe"
 )
 
 const (
-	version = "v2"
+	version = "v3"
 
 	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
@@ -29,7 +31,7 @@ var (
 
 	profileTypes = []string{"goroutine", "allocs", "heap", "threadcreate", "block", "mutex"}
 
-	// numWorkers = runtime.GOMAXPROCS(0)
+	numWorkers = runtime.GOMAXPROCS(0)
 )
 
 type stat struct {
@@ -37,13 +39,12 @@ type stat struct {
 	cnt           int
 }
 
-func main() {
-	file, size, err := openFile(dataPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
+type remainder struct {
+	loc int64
+	b   []byte
+}
 
+func main() {
 	if pprofEnabled {
 		os.MkdirAll(dir, 0755)
 
@@ -85,7 +86,12 @@ func main() {
 		defer trace.Stop()
 	}
 
-	result, err := processFile(file, size)
+	info, err := os.Stat(dataPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result, err := processFile(info.Size())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -95,31 +101,99 @@ func main() {
 	}
 }
 
-func processFile(file *os.File, size int64) (map[string]stat, error) {
-	sc := bufio.NewScanner(file)
+func processFile(size int64) (map[string]stat, error) {
+	var (
+		stats      = make([]map[string]stat, numWorkers)
+		remainders = make([]remainder, numWorkers)
+		ends       = make([]int64, numWorkers)
+	)
 
-	stats := make(map[string]stat)
-	for sc.Scan() {
-		key, val, err := parseLine(sc.Bytes())
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	chunkPerWorker := size / int64(numWorkers)
+	offset := int64(0)
+
+	for i := 0; i < numWorkers; i++ {
+		s := chunkPerWorker
+		if i == numWorkers-1 {
+			s = size - offset
+		}
+		go func(i int, offset, size int64) {
+			defer wg.Done()
+			stat, rem, end, err := processChunk(offset, size)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			stats[i] = stat
+			ends[i] = end
+			remainders[i] = rem
+		}(i, offset, s)
+		offset += s
+	}
+
+	wg.Wait()
+
+	rootStat := stats[0]
+	for _, s := range stats[1:] {
+		mergeStat(rootStat, s)
+	}
+
+	// First remainder should always be valid.
+	remainders = remainders[1:]
+
+	for i, rem := range remainders {
+		if rem.loc < ends[i] {
+			continue
+		}
+		k, v, err := parseLine(rem.b)
 		if err != nil {
 			return nil, fmt.Errorf("parsing line: %w", err)
 		}
-
-		s, ok := stats[key]
-		if !ok {
-			stats[key] = stat{sum: val, max: val, min: val, cnt: 1}
-			continue
-		}
-
-		s.cnt++
-		s.max = max(s.max, val)
-		s.min = min(s.min, val)
-		s.sum += val
-
-		stats[key] = s
+		updateStat(rootStat, k, v)
 	}
 
-	return stats, sc.Err()
+	return rootStat, nil
+}
+
+func processChunk(offset, chunkSize int64) (map[string]stat, remainder, int64, error) {
+	file, err := os.Open(dataPath)
+	if err != nil {
+		return nil, remainder{}, 0, fmt.Errorf("opening file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(offset, 0); err != nil {
+		return nil, remainder{}, 0, fmt.Errorf("seeking offset from file: %w", err)
+	}
+
+	sc := bufio.NewScanner(file)
+	stats := make(map[string]stat)
+
+	var rem remainder
+	if sc.Scan() {
+		// Always send first line. Since it could be malformed data.
+		rem = remainder{loc: offset, b: bytes.Clone(sc.Bytes())}
+		offset += int64(len(sc.Bytes()))
+	}
+
+	limit := offset + chunkSize
+	for offset < limit && sc.Scan() {
+		station, val, err := parseLine(sc.Bytes())
+		if err != nil {
+			return nil, remainder{}, 0, fmt.Errorf("parsing line: %w", err)
+		}
+
+		updateStat(stats, station, val)
+		offset += int64(len(sc.Bytes()))
+	}
+
+	if sc.Err() != nil && sc.Err() != io.EOF {
+		return nil, remainder{}, 0, fmt.Errorf("reading file: %w", sc.Err())
+	}
+
+	return stats, rem, offset, nil
 }
 
 func parseLine(line []byte) (string, float64, error) {
@@ -179,20 +253,37 @@ func writeResult(w io.Writer, result map[string]stat) error {
 	return nil
 }
 
-func openFile(path string) (*os.File, int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, 0, fmt.Errorf("opening file: %w", err)
+func updateStat(stats map[string]stat, key string, val float64) {
+	s, ok := stats[key]
+	if !ok {
+		stats[key] = stat{sum: val, max: val, min: val, cnt: 1}
+		return
 	}
 
-	stat, err := file.Stat()
-	if err != nil {
-		return nil, 0, fmt.Errorf("getting file stat: %w", err)
-	}
+	s.cnt++
+	s.max = max(s.max, val)
+	s.min = min(s.min, val)
+	s.sum += val
 
-	return file, stat.Size(), nil
+	stats[key] = s
 }
 
+func mergeStat(dst map[string]stat, src map[string]stat) {
+	for k, v := range src {
+		stat, ok := dst[k]
+		if !ok {
+			dst[k] = v
+			continue
+		}
+
+		stat.cnt += v.cnt
+		stat.max = max(stat.max, v.max)
+		stat.min = min(stat.min, v.min)
+		stat.sum += v.sum
+
+		dst[k] = stat
+	}
+}
 func round(n float64) float64 {
 	return math.Round(n*10) / 10
 }
