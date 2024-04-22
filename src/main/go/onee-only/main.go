@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	version = "v1"
+	version = "v2"
 
 	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
