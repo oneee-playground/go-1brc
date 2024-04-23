@@ -1,0 +1,10 @@
+goos: linux
+goarch: amd64
+pkg: brc
+cpu: Intel(R) Core(TM) i5-9500F CPU @ 3.00GHz
+BenchmarkParseLine-4   	266256912	        22.74 ns/op
+BenchmarkParseLine-4   	265601320	        22.41 ns/op
+BenchmarkParseLine-4   	265126503	        23.04 ns/op
+BenchmarkParseLine-4   	261038076	        22.56 ns/op
+PASS
+ok  	brc	33.181s

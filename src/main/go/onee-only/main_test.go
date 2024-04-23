@@ -11,8 +11,8 @@ func TestParseLine(t *testing.T) {
 		t.Error(err)
 	}
 
-	if bytes.Equal(k, []byte("hi")) || v != -42.5 {
-		t.Error(k, v)
+	if !bytes.Equal(k, []byte("hi")) || float64(v)/10 != -42.5 {
+		t.Error(string(k), float64(v)/10)
 	}
 }
 

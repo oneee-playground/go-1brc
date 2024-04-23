@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	version = "v5"
+	version = "v6"
 
 	dataPath = "/media/oneee/Dev Storage/measurements.txt"
 
@@ -39,7 +39,7 @@ var (
 )
 
 type stat struct {
-	sum, max, min float64
+	sum, max, min int64
 	cnt           int
 }
 
@@ -264,7 +264,7 @@ func processChunk(r io.Reader, offset, chunkSize int) (*[entrySize]entry, remain
 	return &entries, rem, offset, nil
 }
 
-func parseLine(line []byte) ([]byte, float64, error) {
+func parseLine(line []byte) ([]byte, int64, error) {
 	idx := bytes.IndexByte(line, ';')
 	station := line[:idx]
 	data := line[idx+1:]
@@ -272,20 +272,20 @@ func parseLine(line []byte) ([]byte, float64, error) {
 	key := make([]byte, len(station))
 	copy(key, station)
 
-	val := parseFloat64(data)
+	val := parseToInt64(data)
 	return key, val, nil
 }
 
-func parseFloat64(b []byte) float64 {
+func parseToInt64(b []byte) int64 {
 	signed := b[0] == '-'
 	if signed {
 		b = b[1:]
 	}
 
-	val := float64(b[len(b)-1]-'0') / 10
-	mul := 1.0
+	val := int64(b[len(b)-1] - '0')
+	mul := int64(10)
 	for i := len(b) - 3; i >= 0; i-- {
-		val += float64(b[i]-'0') * mul
+		val += int64(b[i]-'0') * mul
 		mul *= 10
 	}
 
@@ -311,9 +311,9 @@ func writeResult(w io.Writer, result map[string]stat) error {
 		}
 		stat := result[key]
 
-		mean := stat.sum / float64(stat.cnt)
+		mean := (float64(stat.sum) / float64(stat.cnt)) / 10
 
-		fmt.Fprintf(w, "%s=%.1f/%.1f/%.1f", key, round(stat.min), round(mean), round(stat.max))
+		fmt.Fprintf(w, "%s=%.1f/%.1f/%.1f", key, round(float64(stat.min)), round(mean), round(float64(stat.max)))
 	}
 	w.Write([]byte("}"))
 
