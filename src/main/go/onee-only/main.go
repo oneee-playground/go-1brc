@@ -304,18 +304,21 @@ func writeResult(w io.Writer, result map[string]stat) error {
 
 	sort.Strings(keys)
 
-	w.Write([]byte("{"))
+	bw := bufio.NewWriter(w)
+	defer bw.Flush()
+
+	bw.Write([]byte("{"))
 	for i, key := range keys {
 		if i > 0 {
-			w.Write([]byte(", "))
+			bw.Write([]byte(", "))
 		}
 		stat := result[key]
 
 		mean := (float64(stat.sum) / float64(stat.cnt)) / 10
 
-		fmt.Fprintf(w, "%s=%.1f/%.1f/%.1f", key, round(float64(stat.min)), round(mean), round(float64(stat.max)))
+		fmt.Fprintf(bw, "%s=%.1f/%.1f/%.1f", key, round(float64(stat.min)), round(mean), round(float64(stat.max)))
 	}
-	w.Write([]byte("}"))
+	bw.Write([]byte("}"))
 
 	return nil
 }
