@@ -14,6 +14,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -307,20 +308,30 @@ func writeResult(w io.Writer, result map[string]stat) error {
 	bw := bufio.NewWriter(w)
 	defer bw.Flush()
 
-	bw.Write([]byte("{"))
+	bw.WriteByte('{')
 	for i, key := range keys {
 		if i > 0 {
-			bw.Write([]byte(", "))
+			bw.WriteString(", ")
 		}
 		stat := result[key]
 
-		mean := (float64(stat.sum) / float64(stat.cnt)) / 10
+		mean := (float64(stat.sum) / float64(stat.cnt))
 
-		fmt.Fprintf(bw, "%s=%.1f/%.1f/%.1f", key, round(float64(stat.min)), round(mean), round(float64(stat.max)))
+		bw.WriteString(key)
+		bw.WriteByte('=')
+		writeFloat(bw, float64(stat.min)/10)
+		bw.WriteByte('/')
+		writeFloat(bw, round(mean/10))
+		bw.WriteByte('/')
+		writeFloat(bw, float64(stat.max)/10)
 	}
-	bw.Write([]byte("}"))
+	bw.WriteByte('}')
 
 	return nil
+}
+
+func writeFloat(bw *bufio.Writer, v float64) {
+	bw.WriteString(strconv.FormatFloat(v, 'f', -1, 64))
 }
 
 func round(n float64) float64 {
